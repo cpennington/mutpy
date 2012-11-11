@@ -17,6 +17,7 @@ def notmutate(sth):
 
 
 class KillableThread(threading.Thread):
+    daemon = True
 
     def kill(self):
         if self.isAlive():
@@ -103,7 +104,7 @@ class ModulesLoader:
 
 
 class ModuleInjector:
-    
+
     def __init__(self, source):
         self.source = source
 
@@ -129,7 +130,7 @@ class ModuleInjector:
     def try_inject_other(self, imported_as, target):
         if imported_as in self.source.__dict__ and not self.is_restricted(imported_as):
             target.__dict__[imported_as] = self.source.__dict__[imported_as]
-        
+
     def is_restricted(self, name):
         return name in ['__builtins__', '__name__', '__doc__', '__file__']
 
@@ -196,7 +197,7 @@ class Timer:
 
 class TimeRegister:
     executions = defaultdict(float)
-    timer_class = Timer 
+    timer_class = Timer
     stack = []
 
     def __init__(self, method):
