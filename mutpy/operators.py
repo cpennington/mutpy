@@ -1,17 +1,19 @@
 import ast
 import re
 import copy
+import functools
 from mutpy import utils
 
 class MutationResign(Exception): pass
 
 class MutationOperator:
 
-    def mutate(self, node, to_mutate=None, sampler=None, coverage_injector=None):
+    def mutate(self, node, to_mutate=None, sampler=None, coverage_injector=None, module=None):
         self.to_mutate = to_mutate
         self.sampler = sampler
         self.lineno = 1
         self.coverage_injector = coverage_injector
+        self.module = module
         for new_node in self.visit(node):
             yield new_node, self.lineno
 
@@ -105,43 +107,101 @@ class MutationOperator:
         return cls.__name__
 
 
-class ArithmeticOperatorReplacement(MutationOperator):
+class AbstractArithmeticOperatorReplacement(MutationOperator):
 
     def mutate_Add(self, node):
-        return ast.Sub()
+        if self.should_mutate(node):
+            return ast.Sub()
+        raise MutationResign()
 
     def mutate_Sub(self, node):
-        return ast.Add()
+        if self.should_mutate(node):
+            return ast.Add()
+        raise MutationResign()
 
     def mutate_Mult_to_Div(self, node):
-        return ast.Div()
+        if self.should_mutate(node):
+            return ast.Div()
+        raise MutationResign()
 
     def mutate_Mult_to_FloorDiv(self, node):
-        return ast.FloorDiv()
+        if self.should_mutate(node):
+            return ast.FloorDiv()
+        raise MutationResign()
 
     def mutate_Mult_to_Pow(self, node):
-        return ast.Pow()
+        if self.should_mutate(node):
+            return ast.Pow()
+        raise MutationResign()
 
     def mutate_Div_to_Mult(self, node):
-        return ast.Mult()
+        if self.should_mutate(node):
+            return ast.Mult()
+        raise MutationResign()
 
     def mutate_Div_to_FloorDiv(self, node):
-        return ast.FloorDiv()
+        if self.should_mutate(node):
+            return ast.FloorDiv()
+        raise MutationResign()
 
     def mutate_FloorDiv_to_Div(self, node):
-        return ast.Div()
+        if self.should_mutate(node):
+            return ast.Div()
+        raise MutationResign()
 
     def mutate_FloorDiv_to_Mult(self, node):
-        return ast.Mult()
+        if self.should_mutate(node):
+            return ast.Mult()
+        raise MutationResign()
 
     def mutate_Mod(self, node):
-        return ast.Mult()
+        if self.should_mutate(node):
+            return ast.Mult()
+        raise MutationResign()
 
     def mutate_Pow(self, node):
-        return ast.Mult()
+        if self.should_mutate(node):
+            return ast.Mult()
+        raise MutationResign()
 
 
-class BitwiseOperatorReplacement(MutationOperator):
+class ArithmeticOperatorReplacement(AbstractArithmeticOperatorReplacement):
+
+    def should_mutate(self, node):
+        return not isinstance(node.parent, ast.AugAssign)
+
+    def mutate_USub(self, node):
+        return ast.UAdd()
+
+    def mutate_UAdd(self, node):
+        return ast.USub()
+
+
+class AssignmentOperatorReplacement(AbstractArithmeticOperatorReplacement):
+
+    def should_mutate(self, node):
+        return isinstance(node.parent, ast.AugAssign)
+
+    @classmethod
+    def name(cls):
+        return 'ASR'
+
+
+class AbstractUnaryOperatorDeletion(MutationOperator):
+
+    def mutate_UnaryOp(self, node):
+        if isinstance(node.op, self.get_operator_type()):
+            return node.operand
+        raise MutationResign()
+
+
+class ArithmeticOperatorDeletion(AbstractUnaryOperatorDeletion):
+
+    def get_operator_type(self):
+        return ast.UAdd, ast.USub
+
+
+class LogicalOperatorReplacement(MutationOperator):
 
     def mutate_BitAnd(self, node):
         return ast.BitOr()
@@ -159,7 +219,13 @@ class BitwiseOperatorReplacement(MutationOperator):
         return ast.LShift()
 
 
-class LogicalOperatorReplacement(MutationOperator):
+class LogicalOperatorDeletion(AbstractUnaryOperatorDeletion):
+
+    def get_operator_type(self):
+        return ast.Invert
+
+
+class LogicalConnectorReplacement(MutationOperator):
 
     def mutate_And(self, node):
         return ast.Or()
@@ -168,7 +234,7 @@ class LogicalOperatorReplacement(MutationOperator):
         return ast.And()
 
 
-class ConditionalOperatorReplacement(MutationOperator):
+class RelationalOperatorReplacement(MutationOperator):
 
     def mutate_Lt(self, node):
         return ast.Gt()
@@ -199,15 +265,6 @@ class ConditionalOperatorReplacement(MutationOperator):
 
     def mutate_NotEq(self, node):
         return ast.Eq()
-
-
-class UnaryOperatorReplacement(MutationOperator):
-
-    def mutate_USub(self, node):
-        return ast.UAdd()
-
-    def mutate_UAdd(self, node):
-        return ast.USub()
 
 
 class ConstantReplacement(MutationOperator):
@@ -254,7 +311,6 @@ class StatementDeletion(MutationOperator):
     def name(cls):
         return 'SDL'
 
-
 class ConditionalOperatorInsertion(MutationOperator):
 
     def negate_test(self, node):
@@ -267,6 +323,12 @@ class ConditionalOperatorInsertion(MutationOperator):
 
     def mutate_If(self, node):
         return self.negate_test(node)
+
+
+class ConditionalOperatorDeletion(AbstractUnaryOperatorDeletion):
+
+    def get_operator_type(self):
+        return ast.Not
 
 
 class SliceIndexRemove(MutationOperator):
@@ -299,10 +361,24 @@ class MembershipTestReplacement(MutationOperator):
         return ast.In()
 
 
-class ExceptionHandleDeletion(MutationOperator):
+class ExceptionHandlerDeletion(MutationOperator):
 
     def mutate_ExceptHandler(self, node):
+        if node.body and isinstance(node.body[0], ast.Raise):
+            raise MutationResign()
         return ast.ExceptHandler(type=node.type, name=node.name, body=[ast.Raise()])
+
+
+class ExceptionSwallowing(MutationOperator):
+
+    def mutate_ExceptHandler(self, node):
+        if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+            raise MutationResign()
+        return ast.ExceptHandler(type=node.type, name=node.name, body=[ast.Pass()])
+
+    @classmethod
+    def name(cls):
+        return 'EXS'
 
 
 class ZeroIterationLoop(MutationOperator):
@@ -395,22 +471,188 @@ class ClassmethodDecoratorInsertion(MethodDecoratorInsertionMutationOperator):
         return 'classmethod'
 
 
+class AbstractOverriddenElementModification(MutationOperator):
+
+    def is_overridden(self, node, name=None):
+        if not name:
+            name = node.name
+        parent = node.parent
+        parent_names = []
+        while parent:
+            if not isinstance(parent, ast.Module):
+                parent_names.append(parent.name)
+            if not isinstance(parent, ast.ClassDef) and not isinstance(parent, ast.Module):
+                raise MutationResign()
+            parent = parent.parent
+        getattr_rec = lambda obj, attr: functools.reduce(getattr, attr, obj)
+        klass = getattr_rec(self.module, reversed(parent_names))
+        for base_klass in klass.mro()[1:-1]:
+            if hasattr(base_klass, name):
+                return True
+        return False
+
+
+class OverridingMethodDeletion(AbstractOverriddenElementModification):
+
+    def mutate_FunctionDef(self, node):
+        if self.is_overridden(node):
+            return ast.Pass()
+        raise MutationResign()
+
+    @classmethod
+    def name(cls):
+        return 'IOD'
+
+
+class HidingVariableDeletion(AbstractOverriddenElementModification):
+
+    def mutate_Assign(self, node):
+        if len(node.targets) > 1:
+            raise MutationResign()
+        if isinstance(node.targets[0], ast.Name) and self.is_overridden(node, name=node.targets[0].id):
+            return ast.Pass()
+        elif isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple):
+            return self.mutate_unpack(node)
+        else:
+            raise MutationResign()
+
+    def mutate_unpack(self, node):
+        target = node.targets[0]
+        value = node.value
+        new_targets = []
+        new_values = []
+        for target_element, value_element in zip(target.elts, value.elts):
+            if not self.is_overridden(node, target_element.id):
+                new_targets.append(target_element)
+                new_values.append(value_element)
+        if len(new_targets) == len(target.elts):
+            raise MutationResign()
+        if not new_targets:
+            return ast.Pass()
+        elif len(new_targets) == 1:
+            node.targets = new_targets
+            node.value = new_values[0]
+            return node
+        else:
+            target.elts = new_targets
+            value.elts = new_values
+            return node
+
+    @classmethod
+    def name(cls):
+        return 'IHD'
+
+
+class AbstractSuperCallingModification(MutationOperator):
+
+    def is_super_call(self, node, stmt):
+        return isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) and \
+            isinstance(stmt.value.func, ast.Attribute) and isinstance(stmt.value.func.value, ast.Call) and \
+            isinstance(stmt.value.func.value.func, ast.Name) and stmt.value.func.value.func.id == 'super' and \
+            stmt.value.func.attr == node.name
+
+    def should_mutate(self, node):
+        return isinstance(node.parent, ast.ClassDef)
+
+    def get_super_call(self, node):
+        for index, stmt in enumerate(node.body):
+            if self.is_super_call(node, stmt):
+                break
+        else:
+            return None, None
+        return index, stmt
+
+
+class OverriddenMethodCallingPositionChange(AbstractSuperCallingModification):
+
+    def should_mutate(self, node):
+        return super().should_mutate(node) and len(node.body) > 1
+
+    def mutate_FunctionDef(self, node):
+        if not self.should_mutate(node):
+            raise MutationResign()
+        index, stmt = self.get_super_call(node)
+        if index is None:
+            raise MutationResign()
+        super_call = node.body[index]
+        del node.body[index]
+        if index == 0:
+            node.body.append(super_call)
+        else:
+            node.body.insert(0, super_call)
+        return node
+
+    @classmethod
+    def name(cls):
+        return 'IOP'
+
+
+class SuperCallingDeletion(AbstractSuperCallingModification):
+
+    def mutate_FunctionDef(self, node):
+        if not self.should_mutate(node):
+            raise MutationResign()
+        index, _ = self.get_super_call(node)
+        if index is None:
+            raise MutationResign()
+        node.body[index] = ast.Pass()
+        return node
+
+
+class SuperCallingInsert(AbstractSuperCallingModification, AbstractOverriddenElementModification):
+
+    def should_mutate(self, node):
+        return super().should_mutate(node) and self.is_overridden(node)
+
+    def mutate_FunctionDef(self, node):
+        if not self.should_mutate(node):
+            raise MutationResign()
+        index, stmt = self.get_super_call(node)
+        if index is not None:
+            raise MutationResign()
+        node.body.insert(0, self.create_super_call(node))
+        return node
+
+    def create_super_call(self, node):
+        super_call = utils.create_ast('super().{}()'.format(node.name)).body[0]
+        for arg in node.args.args[1:-len(node.args.defaults) or None]:
+            super_call.value.args.append(ast.Name(id=arg.arg, ctx=ast.Load()))
+        for arg, default in zip(node.args.args[-len(node.args.defaults):], node.args.defaults):
+            super_call.value.keywords.append(ast.keyword(arg=arg.arg, value=default))
+        for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+            super_call.value.keywords.append(ast.keyword(arg=arg.arg, value=default))
+        if node.args.vararg:
+            super_call.value.starargs = ast.Name(id=node.args.vararg, ctx=ast.Load())
+        if node.args.kwarg:
+            super_call.value.kwargs = ast.Name(id=node.args.kwarg, ctx=ast.Load())
+        return super_call
+
+
 all_operators = {
+    ArithmeticOperatorDeletion,
     ArithmeticOperatorReplacement,
-    BitwiseOperatorReplacement,
+    AssignmentOperatorReplacement,
     ClassmethodDecoratorDeletion,
     ClassmethodDecoratorInsertion,
+    ConditionalOperatorDeletion,
     ConditionalOperatorInsertion,
-    ConditionalOperatorReplacement,
     ConstantReplacement,
-    ExceptionHandleDeletion,
+    ExceptionHandlerDeletion,
+    ExceptionSwallowing,
+    HidingVariableDeletion,
+    LogicalConnectorReplacement,
+    LogicalOperatorDeletion,
     LogicalOperatorReplacement,
     MembershipTestReplacement,
     OneIterationLoop,
+    OverriddenMethodCallingPositionChange,
+    OverridingMethodDeletion,
+    RelationalOperatorReplacement,
     ReverseIterationLoop,
     SliceIndexRemove,
     StatementDeletion,
-    UnaryOperatorReplacement,
-    ZeroIterationLoop
+    SuperCallingDeletion,
+    SuperCallingInsert,
+    ZeroIterationLoop,
 }
 

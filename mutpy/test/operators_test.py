@@ -44,7 +44,7 @@ class MutationOperatorTest(unittest.TestCase):
 
 class OperatorTestCase(unittest.TestCase):
 
-    def assert_mutation(self, original, mutants, lines=None, operator=None, with_coverage=False):
+    def assert_mutation(self, original, mutants, lines=None, operator=None, with_coverage=False, with_exec=False):
         original_ast = utils.create_ast(original)
         if with_coverage:
             coverage_injector = coverage.CoverageInjector()
@@ -57,9 +57,15 @@ class OperatorTestCase(unittest.TestCase):
             mutants = [mutants]
         mutants = list(map(codegen.remove_extra_lines, mutants))
         original = codegen.remove_extra_lines(original)
-        for mutant, lineno in operator.mutate(original_ast, coverage_injector=coverage_injector):
+        module = None
+        if with_exec:
+            module = utils.create_module(original_ast)
+        for mutant, lineno in operator.mutate(original_ast, coverage_injector=coverage_injector, module=module):
             mutant_code = codegen.remove_extra_lines(codegen.to_source(mutant))
-            self.assertIn(mutant_code, mutants)
+            msg = '\n\nMutant:\n\n' + mutant_code + '\n\nNot found in:'
+            for other_mutant in mutants:
+                msg += '\n\n----------\n\n' + other_mutant
+            self.assertIn(mutant_code, mutants, msg)
             mutants.remove(mutant_code)
             self.assert_location(mutant)
             if not lines is None:
@@ -155,15 +161,47 @@ class ArithmeticOperatorReplacementTest(OperatorTestCase):
                             ['pass' + EOL + 'x - y' + EOL + 'x - y', 'pass' + EOL + 'x + y' + EOL + 'x + y'],
                             [2, 3])
 
-    def test_augmented_add_to_augmented_sub_replacement(self):
-        self.assert_mutation('x += y', ['x -= y'])
+    def test_not_mutate_augmented_assign(self):
+        self.assert_mutation('x += y', [])
+
+    def test_usub(self):
+        self.assert_mutation('(-x)', ['(+x)'])
+
+    def test_uadd(self):
+        self.assert_mutation('(+x)', ['(-x)'])
 
 
-class BitwiseOperatorReplacement(OperatorTestCase):
+class AssignmentOperatorReplacementTest(OperatorTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.op = operators.BitwiseOperatorReplacement()
+        cls.op = operators.AssignmentOperatorReplacement()
+
+    def test_add_to_sub_replacement(self):
+        self.assert_mutation('x += y', ['x -= y'])
+
+    def test_not_mutate_normal_use(self):
+        self.assert_mutation('x + y', [])
+
+
+class ArithmeticOperatorDeletionTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.ArithmeticOperatorDeletion()
+
+    def test_usub(self):
+        self.assert_mutation('-x', ['x'])
+
+    def test_uadd(self):
+        self.assert_mutation('+x', ['x'])
+
+
+class LogicalOperatorReplacementTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.LogicalOperatorReplacement()
 
     def test_bin_and_to_bit_or(self):
         self.assert_mutation('x & y', ['x | y'])
@@ -181,11 +219,21 @@ class BitwiseOperatorReplacement(OperatorTestCase):
         self.assert_mutation('x >> y', ['x << y'])
 
 
-class LogicaOperatorReplacementTest(OperatorTestCase):
+class LogicalOperatorDeletionTest(OperatorTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.op = operators.LogicalOperatorReplacement()
+        cls.op = operators.LogicalOperatorDeletion()
+
+    def test_invert(self):
+        self.assert_mutation('~x', ['x'])
+
+
+class LogicalConnectorReplacementTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.LogicalConnectorReplacement()
 
     def test_and_to_or(self):
         self.assert_mutation('(x and y)', ['(x or y)'])
@@ -194,11 +242,11 @@ class LogicaOperatorReplacementTest(OperatorTestCase):
         self.assert_mutation('(x or y)', ['(x and y)'])
 
 
-class ConditionalOperatorReplacementTest(OperatorTestCase):
+class RelationalOperatorReplacementTest(OperatorTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.op = operators.ConditionalOperatorReplacement()
+        cls.op = operators.RelationalOperatorReplacement()
 
     def test_lt(self):
         self.assert_mutation('x < y', ['x > y', 'x <= y'])
@@ -217,19 +265,6 @@ class ConditionalOperatorReplacementTest(OperatorTestCase):
 
     def test_not_eq(self):
         self.assert_mutation('x != y', ['x == y'])
-
-
-class UnaryOperatorReplacementTest(OperatorTestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        cls.op = operators.UnaryOperatorReplacement()
-
-    def test_usub(self):
-        self.assert_mutation('(-x)', ['(+x)'])
-
-    def test_uadd(self):
-        self.assert_mutation('(+x)', ['(-x)'])
 
 
 class SliceIndexRemoveTest(OperatorTestCase):
@@ -260,6 +295,16 @@ class ConditionalOperatorInsertionTest(OperatorTestCase):
                             lines=[1, 3])
 
 
+class ConditionalOperatorDeletionTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.ConditionalOperatorDeletion()
+
+    def test_not(self):
+        self.assert_mutation('not x', ['x'])
+
+
 class MembershipTestReplacementTest(OperatorTestCase):
 
     @classmethod
@@ -273,11 +318,39 @@ class MembershipTestReplacementTest(OperatorTestCase):
         self.assert_mutation('x not in y', ['x in y'])
 
 
-class ExceptionHandleDeletionTest(OperatorTestCase):
+class ExceptionSwallowingTest(OperatorTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.op = operators.ExceptionHandleDeletion()
+        cls.op = operators.ExceptionSwallowing()
+
+    def test_swallow_exception(self):
+        self.assert_mutation(utils.f("""
+        try:
+            pass
+        except:
+            raise
+        """), [utils.f("""
+        try:
+            pass
+        except:
+            pass
+        """)])
+
+    def test_not_swallow_if_pass(self):
+        self.assert_mutation(utils.f("""
+        try:
+            pass
+        except:
+            pass
+        """), [])
+
+
+class ExceptionHandlerDeletionTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.ExceptionHandlerDeletion()
 
     def test_delete_except(self):
         self.assert_mutation('try:' + EOL + INDENT + PASS + EOL + 'except Z:' + EOL + INDENT + PASS,
@@ -290,6 +363,14 @@ class ExceptionHandleDeletionTest(OperatorTestCase):
                             + INDENT + 'raise' + EOL + 'except Y:' + EOL + INDENT + PASS,
                              'try:' + EOL + INDENT + PASS + EOL + 'except Z:' + EOL
                             + INDENT + PASS + EOL + 'except Y:' + EOL + INDENT + 'raise'])
+
+    def test_not_delete_if_raise(self):
+        self.assert_mutation(utils.f("""
+        try:
+            pass
+        except:
+            raise
+        """), [])
 
 
 class ZeroIterationLoopTest(OperatorTestCase):
@@ -524,7 +605,7 @@ class MutateOnlyCoveredNodesTest(OperatorTestCase):
         self.assert_mutation('try:' + EOL + INDENT + 'raise' + EOL + 'except:' + EOL + INDENT + 'try:' + EOL +
                              2 * INDENT + PASS + EOL + INDENT + 'except:' + EOL + 2 * INDENT + PASS,
                              ['try:' + EOL + INDENT + 'raise' + EOL + 'except:' + EOL + INDENT + 'raise'],
-                             operator=operators.ExceptionHandleDeletion(),
+                             operator=operators.ExceptionHandlerDeletion(),
                              with_coverage=True)
 
     def test_not_covered_for_node(self):
@@ -539,3 +620,197 @@ class MutateOnlyCoveredNodesTest(OperatorTestCase):
                              operator=operators.ClassmethodDecoratorDeletion(),
                              with_coverage=True)
 
+
+class OverridingMethodDeletionTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.OverridingMethodDeletion()
+
+    def test_delete_overriding_method(self):
+        self.assert_mutation(utils.f("""
+        class A:
+            def foo(self):
+                pass
+        class B(A):
+            def foo(self):
+                pass
+        """), [utils.f("""
+        class A:
+            def foo(self):
+                pass
+        class B(A):
+            pass
+        """)], with_exec=True)
+
+    def test_delete_overriding_method_in_inner_class(self):
+        self.assert_mutation(utils.f("""
+        class X:
+            class A:
+                def foo(self):
+                    pass
+            class B(A):
+                def foo(self):
+                    pass
+        """), [utils.f("""
+        class X:
+            class A:
+                def foo(self):
+                    pass
+            class B(A):
+                pass
+        """)], with_exec=True)
+
+    def test_delete_overriding_method_when_base_class_from_other_module(self):
+        self.assert_mutation(utils.f("""
+        import ast
+        class A(ast.NodeTransformer):
+            def visit(self):
+                pass
+        """), [utils.f("""
+        import ast
+        class A(ast.NodeTransformer):
+            pass
+        """)], with_exec=True)
+
+
+class OverriddenMethodCallingPositionChangeTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.OverriddenMethodCallingPositionChange()
+
+    def test_change_position_from_first_to_last(self):
+        self.assert_mutation(utils.f("""
+        class A:
+            def foo(self):
+                super().foo()
+                pass
+        """), [utils.f("""
+        class A:
+            def foo(self):
+                pass
+                super().foo()
+        """)])
+
+    def test_change_position_from_last_to_first(self):
+        self.assert_mutation(utils.f("""
+        class A:
+            def foo(self):
+                pass
+                super().foo()
+        """), [utils.f("""
+        class A:
+            def foo(self):
+                super().foo()
+                pass
+        """)])
+
+    def test_not_change_position_if_single_statement(self):
+        self.assert_mutation(utils.f("""
+        class A:
+            def foo(self):
+                super().foo()
+        """), [])
+
+
+class SuperCallingDeletionTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.SuperCallingDeletion()
+
+    def test_change_position_from_first_to_last(self):
+        self.assert_mutation(utils.f("""
+        class A:
+            def foo(self, x):
+                super().foo(x)
+        """), [utils.f("""
+        class A:
+            def foo(self, x):
+                pass
+        """)])
+
+
+class SuperCallingInsertTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.SuperCallingInsert()
+
+    def test_change_position_from_first_to_last(self):
+        self.assert_mutation(utils.f("""
+        class B:
+            def foo(self, x, y=1, *args, **kwargs):
+                pass
+        class A(B):
+            def foo(self, x, y=1, *args, **kwargs):
+                pass
+        """), [utils.f("""
+        class B:
+            def foo(self, x, y=1, *args, **kwargs):
+                pass
+        class A(B):
+            def foo(self, x, y=1, *args, **kwargs):
+                super().foo(x, y=1, *args, **kwargs)
+                pass
+        """)], with_exec=True)
+
+
+class HidingVariableDeletionTest(OperatorTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.op = operators.HidingVariableDeletion()
+
+    def test_delete_variable(self):
+        self.assert_mutation(utils.f("""
+        class B:
+            x = 1
+        class A(B):
+            x = 2
+        """), [utils.f("""
+        class B:
+            x = 1
+        class A(B):
+            pass
+        """)], with_exec=True)
+
+    def test_delete_variable_if_one_hiding_in_two_targets(self):
+        self.assert_mutation(utils.f("""
+        class B:
+            x = 1
+        class A(B):
+            (x, y) = (2, 3)
+        """), [utils.f("""
+        class B:
+            x = 1
+        class A(B):
+            y = 3
+        """)], with_exec=True)
+
+    def test_delete_variable_if_one_hiding_in_three_targets(self):
+        self.assert_mutation(utils.f("""
+        class B:
+            x = 1
+        class A(B):
+            (x, y, z) = (2, 3, 4)
+        """), [utils.f("""
+        class B:
+            x = 1
+        class A(B):
+            (y, z) = (3, 4)
+        """)], with_exec=True)
+
+    def test_delete_variable_if_two_hiding_in_two_targets(self):
+        self.assert_mutation(utils.f("""
+        class B:
+            (x, y) = (1, 2)
+        class A(B):
+            (x, y) = (3, 4)
+        """), [utils.f("""
+        class B:
+            (x, y) = (1, 2)
+        class A(B):
+            pass
+        """)], with_exec=True)
